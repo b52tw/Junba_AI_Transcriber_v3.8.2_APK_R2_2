@@ -1,0 +1,11 @@
+R2.2 full rerun policy
+======================
+- Clean Gradle build: YES
+- Kotlin compile: required
+- Java compile: required
+- APK assemble: required
+- Artifact upload: immediately after successful assemble
+- Optional APK diagnostics: non-blocking
+- Windows build: not included
+- Portable build: not included
+- Runtime source baseline: R2.1

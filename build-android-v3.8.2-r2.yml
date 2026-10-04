@@ -1,0 +1,168 @@
+name: Build Junba Android APK v3.8.2 R2.2
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'android/**'
+      - '.github/workflows/build-android-v3.8.2-r2.yml'
+  pull_request:
+    paths:
+      - 'android/**'
+      - '.github/workflows/build-android-v3.8.2-r2.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: junba-v382-apk-r22-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android-apk-r22:
+    name: Clean Build APK R2.2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Locate Android sdkmanager
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER=""
+          for p in "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "$SDK_ROOT/cmdline-tools/bin/sdkmanager"; do
+            if [ -x "$p" ]; then SDKMANAGER="$p"; break; fi
+          done
+          if [ -z "$SDKMANAGER" ] && [ -d "$SDK_ROOT" ]; then
+            SDKMANAGER="$(find "$SDK_ROOT" -type f -name sdkmanager -perm -111 2>/dev/null | head -n 1 || true)"
+          fi
+          if [ -z "$SDKMANAGER" ]; then
+            SDK_ROOT="$HOME/android-sdk"
+            mkdir -p "$SDK_ROOT/cmdline-tools"
+            curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" -o /tmp/cmdline-tools.zip
+            rm -rf /tmp/android-cli && mkdir -p /tmp/android-cli
+            unzip -q /tmp/cmdline-tools.zip -d /tmp/android-cli
+            mv /tmp/android-cli/cmdline-tools "$SDK_ROOT/cmdline-tools/latest"
+            SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" --licenses >/dev/null || true
+          "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Essential source preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f android/settings.gradle.kts
+          test -f android/build.gradle.kts
+          test -f android/app/build.gradle.kts
+          test -f android/app/src/main/AndroidManifest.xml
+          test -f android/app/src/main/java/tw/junba/transcriber/MainActivity.java
+          test -f android/app/src/main/java/tw/junba/transcriber/LocalWhisperEngine.kt
+          test -f android/app/src/main/java/tw/junba/transcriber/AudioPreprocessor.kt
+          test -f android/app/src/main/java/tw/junba/transcriber/SecureKeyStore.java
+          grep -q 'versionCode = 386' android/app/build.gradle.kts
+          grep -q '3.8.2-apk-r2.2' android/app/build.gradle.kts
+          grep -q 'whisper-android:1.0.0' android/app/build.gradle.kts
+          if grep -q 'ffmpeg-kit-audio' android/app/build.gradle.kts; then
+            echo 'ERROR: ffmpeg-kit-audio must not be packaged alongside whisper-android'
+            exit 1
+          fi
+
+      - name: Clean compile and build APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle -p android \
+            clean \
+            :app:compileDebugKotlin \
+            :app:compileDebugJavaWithJavac \
+            :app:assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            --refresh-dependencies
+
+      - name: Package APK immediately
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK='android/app/build/outputs/apk/debug/app-debug.apk'
+          test -s "$APK"
+          mkdir -p r
+          cp "$APK" 'r/Junba-R2.2.apk'
+          sha256sum 'r/Junba-R2.2.apk' > r/SHA256.txt
+          printf '%s\n' \
+            'R2.2 clean-build result:' \
+            '- Android project compiled from a clean Gradle build.' \
+            '- APK assembly completed successfully.' \
+            '- Artifact is uploaded before optional diagnostic inspection.' \
+            '- Runtime application code is based on R2.1; only version label/build pipeline changed.' \
+            > r/BUILD_RESULT.txt
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Junba-v382-APK-R2.2
+          path: |
+            r/Junba-R2.2.apk
+            r/SHA256.txt
+            r/BUILD_RESULT.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Optional APK diagnostics
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          APK='r/Junba-R2.2.apk'
+          AAPT="$ANDROID_SDK_ROOT/build-tools/35.0.0/aapt"
+          APKSIGNER="$ANDROID_SDK_ROOT/build-tools/35.0.0/apksigner"
+
+          echo '=== APK file ==='
+          ls -lh "$APK"
+
+          echo '=== Native libraries ==='
+          unzip -l "$APK" | grep 'lib/arm64-v8a/' || true
+
+          echo '=== libc++_shared count ==='
+          unzip -l "$APK" | grep -c 'lib/arm64-v8a/libc++_shared.so' || true
+
+          echo '=== Package / launcher ==='
+          "$AAPT" dump badging "$APK" | grep -E "package:|launchable-activity:" || true
+
+          echo '=== Signature ==='
+          "$APKSIGNER" verify --verbose "$APK" || true
+
+      - name: Final result
+        shell: bash
+        run: |
+          echo 'APK R2.2 build and artifact upload completed.'
+          echo 'Download artifact: Junba-v382-APK-R2.2'
